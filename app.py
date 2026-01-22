@@ -1,131 +1,182 @@
 import streamlit as st
-import pdfplumber
 import google.generativeai as genai
 import json
-import os
+from gtts import gTTS
+import base64
 
-# --- Configuration ---
-st.set_page_config(page_title="PDF Practice Pal", layout="centered")
+# --- Page Configuration ---
+st.set_page_config(page_title="Tamil Practice Master", layout="centered")
 
-# --- Sidebar for API Key ---
+# --- Custom CSS for Tamil Readability ---
+st.markdown("""
+    <style>
+    .tamil-text {
+        font-size: 18px !important;
+        font-family: 'Nirmala UI', 'Latha', sans-serif;
+        line-height: 1.8;
+        background-color: #f8f9fa;
+        padding: 20px;
+        border-radius: 10px;
+        border-left: 5px solid #ff4b4b;
+    }
+    .stButton button {
+        width: 100%;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- Session State Initialization ---
+if "extracted_text" not in st.session_state:
+    st.session_state.extracted_text = None
+if "quiz_data" not in st.session_state:
+    st.session_state.quiz_data = None
+if "quiz_submitted" not in st.session_state:
+    st.session_state.quiz_submitted = False
+
+# --- Sidebar ---
 with st.sidebar:
     st.header("⚙️ Settings")
-    api_key = st.text_input("Enter Google Gemini API Key", type="password")
-    st.markdown("[Get a Free Key Here](https://aistudio.google.com/app/apikey)")
-    st.info("Your key is not saved permanently.")
+    api_key = st.text_input("Enter Gemini API Key", type="password")
+    st.info("Step 1: Read & Extract Text\nStep 2: Generate Quiz")
 
 # --- Helper Functions ---
-def extract_text_from_pdf(file):
-    text = ""
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
-            text += page.extract_text()
-    return text
+def get_audio_html(text):
+    """Generates an HTML audio player for Tamil text"""
+    try:
+        # Generate audio for first 1000 chars to keep it fast
+        tts = gTTS(text=text[:1000], lang='ta')
+        filename = "temp_audio.mp3"
+        tts.save(filename)
+        with open(filename, "rb") as f:
+            data = f.read()
+            b64 = base64.b64encode(data).decode()
+        return f"""
+            <audio controls style="width: 100%;">
+            <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
+            </audio>
+        """
+    except Exception as e:
+        return f"Audio Error: {e}"
 
-def generate_quiz(text_content, num_questions=5):
-    # Configure the AI
+def extract_text_with_ai(file_bytes):
+    """Uses Gemini Vision to OCR the Tamil PDF"""
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-1.5-flash')
-
-    # The Prompt (Instruction to the AI)
-    prompt = f"""
-    You are a strict teacher. Create a specialized practice test based ONLY on the text below.
-    Generate {num_questions} multiple-choice questions.
     
-    Return the response in this strict JSON format:
+    prompt = """
+    You are an expert Tamil Transcriber. 
+    Look at this PDF document. 
+    1. Extract all the text content into clear, readable Tamil Unicode.
+    2. Do NOT summarize. I need the full text for study.
+    3. Ignore page numbers or headers.
+    """
+    try:
+        response = model.generate_content([
+            {'mime_type': 'application/pdf', 'data': file_bytes},
+            prompt
+        ])
+        return response.text
+    except Exception as e:
+        st.error(f"Extraction Error: {e}")
+        return None
+
+def generate_quiz_from_text(text):
+    """Generates JSON Quiz from the extracted text"""
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    prompt = f"""
+    Based on the Tamil text provided below, create a Practice Test.
+    Generate 5 Multiple Choice Questions in Tamil.
+    
+    Strictly follow this JSON format:
     [
         {{
-            "question": "Question text here",
+            "question": "Question in Tamil",
             "options": ["Option A", "Option B", "Option C", "Option D"],
-            "answer": "The correct option text",
-            "explanation": "Why this is correct"
+            "answer": "The correct option content",
+            "explanation": "Why it is correct (in Tamil)"
         }}
     ]
 
-    TEXT TO STUDY:
-    {text_content[:8000]} 
+    TEXT:
+    {text[:10000]}
     """
-    # Note: text[:8000] limits text to avoid token errors.
-
     try:
         response = model.generate_content(prompt)
-        # Clean up json formatting if the AI adds markdown backticks
-        json_text = response.text.replace("```json", "").replace("```", "")
-        return json.loads(json_text)
+        clean_json = response.text.replace("```json", "").replace("```", "")
+        return json.loads(clean_json)
     except Exception as e:
-        st.error(f"Error generating quiz: {e}")
-        return []
+        st.error(f"Quiz Generation Error: {e}")
+        return None
 
 # --- Main App Interface ---
-st.title("📱 PDF Practice App")
-st.write("Upload a PDF to generate a practice test instantly.")
+st.title("📚 Tamil Study & Practice")
 
-uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
-
-# Session State (Keeps data alive while you click buttons)
-if "quiz" not in st.session_state:
-    st.session_state.quiz = None
-if "answers" not in st.session_state:
-    st.session_state.answers = {}
-if "submitted" not in st.session_state:
-    st.session_state.submitted = False
+uploaded_file = st.file_uploader("Upload Tamil PDF", type="pdf")
 
 if uploaded_file and api_key:
-    if st.button("Generate Quiz"):
-        with st.spinner("Analyzing your document..."):
-            text = extract_text_from_pdf(uploaded_file)
-            if len(text) > 100:
-                st.session_state.quiz = generate_quiz(text)
-                st.session_state.answers = {}
-                st.session_state.submitted = False
-            else:
-                st.error("Could not read enough text from this PDF.")
-
-# --- Quiz Display ---
-if st.session_state.quiz:
-    st.divider()
     
-    # Form to hold the inputs
-    with st.form("quiz_form"):
-        for i, q in enumerate(st.session_state.quiz):
-            st.subheader(f"{i + 1}. {q['question']}")
-            
-            # Radio button for options
-            selection = st.radio(
-                "Select an answer:",
-                q['options'],
-                key=f"q_{i}",
-                index=None
-            )
-        
-        submit_btn = st.form_submit_button("Submit Answers")
-        
-        if submit_btn:
-            st.session_state.submitted = True
+    # --- Step 1: Processing Button ---
+    if st.button("🚀 Process PDF (Read & Analyze)"):
+        with st.spinner("AI is reading the Tamil font..."):
+            file_bytes = uploaded_file.getvalue()
+            text = extract_text_with_ai(file_bytes)
+            if text:
+                st.session_state.extracted_text = text
+                st.session_state.quiz_data = None # Reset quiz if new file
+                st.success("PDF Read Successfully!")
 
-    # --- Results Section ---
-    if st.session_state.submitted:
-        st.divider()
-        st.header("📊 Results")
-        score = 0
-        total = len(st.session_state.quiz)
+    # --- Step 2: Display Content (Tabs) ---
+    if st.session_state.extracted_text:
         
-        for i, q in enumerate(st.session_state.quiz):
-            user_ans = st.session_state.get(f"q_{i}")
-            correct_ans = q['answer']
+        tab1, tab2 = st.tabs(["📖 Read & Listen (படி)", "📝 Practice Quiz (பயிற்சி)"])
+        
+        # === TAB 1: READER ===
+        with tab1:
+            st.subheader("🔊 Audio Lesson")
+            if st.button("▶️ Play Audio"):
+                st.markdown(get_audio_html(st.session_state.extracted_text), unsafe_allow_html=True)
             
-            if user_ans == correct_ans:
-                score += 1
-                st.success(f"Q{i+1}: Correct!")
-            else:
-                st.error(f"Q{i+1}: Wrong.")
-                st.markdown(f"**Your Answer:** {user_ans}")
-                st.markdown(f"**Correct Answer:** {correct_ans}")
-                st.info(f"ℹ️ {q['explanation']}")
-        
-        st.subheader(f"Final Score: {score} / {total}")
-        if score == total:
-            st.balloons()
+            st.subheader("📄 Document Text")
+            st.markdown(f'<div class="tamil-text">{st.session_state.extracted_text}</div>', unsafe_allow_html=True)
+
+        # === TAB 2: QUIZ ===
+        with tab2:
+            if st.session_state.quiz_data is None:
+                st.write("Ready to practice?")
+                if st.button("Generate Quiz Now"):
+                    with st.spinner("Creating questions..."):
+                        st.session_state.quiz_data = generate_quiz_from_text(st.session_state.extracted_text)
+                        st.session_state.quiz_submitted = False
+                        st.rerun()
+            
+            # Show Quiz if it exists
+            if st.session_state.quiz_data:
+                with st.form("quiz_form"):
+                    for i, q in enumerate(st.session_state.quiz_data):
+                        st.markdown(f"**{i+1}. {q['question']}**")
+                        st.radio("Select:", q['options'], key=f"q_{i}", label_visibility="collapsed")
+                        st.markdown("---")
+                    
+                    if st.form_submit_button("Submit Answers"):
+                        st.session_state.quiz_submitted = True
+                
+                # Show Results
+                if st.session_state.quiz_submitted:
+                    st.divider()
+                    st.subheader("Results / முடிவுகள்")
+                    score = 0
+                    for i, q in enumerate(st.session_state.quiz_data):
+                        user_val = st.session_state.get(f"q_{i}")
+                        if user_val == q['answer']:
+                            score += 1
+                            st.success(f"Q{i+1} Correct!")
+                        else:
+                            st.error(f"Q{i+1} Wrong.")
+                            st.write(f"Correct: {q['answer']}")
+                            st.info(f"💡 {q['explanation']}")
+                    st.metric("Score", f"{score}/{len(st.session_state.quiz_data)}")
 
 elif uploaded_file and not api_key:
-    st.warning("⚠️ Please enter your API Key in the sidebar to start.")
+    st.warning("Please enter your API Key in the sidebar.")
